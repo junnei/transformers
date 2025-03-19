@@ -113,18 +113,11 @@ def speechlib_mel(sample_rate, n_fft, n_mels, fmin=None, fmax=None):
 class Gemma3AudioFeatureExtractor(SequenceFeatureExtractor):
     model_input_names = ["input_audio_embeds", "audio_embed_sizes", "audio_attention_mask"]
     feature_extractor_type = "Gemma3AudioFeatureExtractor"
-    def __init__(self, audio_compression_rate=8, audio_downsample_rate=1, audio_feat_stride=1, **kwargs):
-        feature_size = 80
-        sampling_rate = 16000
-        padding_value = 0.0
-        super().__init__(feature_size, sampling_rate, padding_value, **kwargs)
-
-        self.compression_rate = audio_compression_rate
-        self.qformer_compression_rate = audio_downsample_rate
-        self.feat_stride = audio_feat_stride
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
 
         self._eightk_method = "fillzero"
-        self._mel = speechlib_mel(16000, 512, 80, fmin=None, fmax=7690).T
+        self._mel = speechlib_mel(sampling_rate, 512, feature_size, fmin=None, fmax=7690).T
 
         self._hamming400 = np.hamming(400)  # for 16k audio
         self._hamming200 = np.hamming(200)  # for 8k audio
