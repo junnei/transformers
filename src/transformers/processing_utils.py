@@ -40,6 +40,10 @@ from .image_utils import (
     load_video,
 )
 
+from .audio_utils import (
+    AudioInput,
+    load_audio,
+)
 
 if is_vision_available():
     from .image_utils import PILImageResampling
@@ -1198,6 +1202,7 @@ class ProcessorMixin(PushToHubMixin):
         batch_images: List[ImageInput],
         batch_videos: List[VideoInput],
         batch_video_metadata: List[List[Dict[str, any]]],
+        batch_audios: List[AudioInput],
         **chat_template_kwargs: Unpack[AllKwargsForChatTemplate],
     ):
         """
@@ -1299,13 +1304,14 @@ class ProcessorMixin(PushToHubMixin):
         sample_indices_fn = chat_template_kwargs.get("sample_indices_fn")
 
         if tokenize:
-            batch_images, batch_videos = [], []
+            batch_images, batch_videos, batch_audios = [], [], []
             batch_video_metadata = []
             for conversation in conversations:
-                images, videos = [], []
+                images, videos, audios = [], [], []
                 video_metadata = []
                 for message in conversation:
                     visuals = [content for content in message["content"] if content["type"] in ["image", "video"]]
+                    audials = [content for content in message["content"] if content["type"] in ["audio"]]
                     image_fnames = [
                         vision_info[key]
                         for vision_info in visuals
@@ -1317,6 +1323,12 @@ class ProcessorMixin(PushToHubMixin):
                         for vision_info in visuals
                         for key in ["video", "url", "path"]
                         if key in vision_info and vision_info["type"] == "video"
+                    ]
+                    audio_fnames = [
+                        audial_info[key]
+                        for audial_info in audials
+                        for key in ["audio", "url", "path"]
+                        if key in audial_info and audial_info["type"] == "audio"
                     ]
                     for fname in image_fnames:
                         images.append(load_image(fname))
@@ -1340,7 +1352,8 @@ class ProcessorMixin(PushToHubMixin):
                             )
                         videos.append(video)
                         video_metadata.append(metadata)
-
+                    for fname in audio_fnames:
+                        audios.append(load_audio(fname))
                 # Currently all processors can accept nested list of batches, but not flat list of visuals
                 # So we'll make a batched list of images and let the processor handle it
                 if images:
@@ -1348,6 +1361,8 @@ class ProcessorMixin(PushToHubMixin):
                 if videos:
                     batch_videos.append(videos)
                     batch_video_metadata.append(video_metadata)
+                if audios:
+                    batch_audios.append(audios)
 
             # Process conversation with video/image information if needed. Then convert into a prompt using Jinja template
             conversations = self._process_messages_for_chat_template(
@@ -1355,6 +1370,7 @@ class ProcessorMixin(PushToHubMixin):
                 batch_images=batch_images,
                 batch_videos=batch_videos,
                 batch_video_metadata=batch_video_metadata,
+                batch_audios=batch_audios,
                 **chat_template_kwargs,
             )
 
@@ -1384,6 +1400,7 @@ class ProcessorMixin(PushToHubMixin):
                 text=prompt,
                 images=batch_images if batch_images else None,
                 videos=batch_videos if batch_videos else None,
+                audios=batch_audios if batch_audios else None,
                 **kwargs,
             )
             if return_dict:
