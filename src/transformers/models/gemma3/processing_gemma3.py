@@ -132,7 +132,7 @@ class Gemma3AudioFeatureExtractor(SequenceFeatureExtractor):
         self.feat_stride = kwargs.get("audio_feat_stride", 1)
 
         self._eightk_method = "fillzero"
-        self._mel = speechlib_mel(16000, 512, 80, fmin=None, fmax=7690).T
+        self._mel = speechlib_mel(self.sampling_rate, 512, self.feature_size, fmin=None, fmax=self.sampling_rate//2-self.feature_size-230).T
 
         self._hamming400 = np.hamming(400)  # for 16k audio
         self._hamming200 = np.hamming(200)  # for 8k audio
