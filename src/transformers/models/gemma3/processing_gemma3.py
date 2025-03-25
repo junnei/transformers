@@ -22,6 +22,8 @@ import torch
 import scipy
 from torch.nn.utils.rnn import pad_sequence
 
+from enum import Enum
+
 from ...feature_extraction_utils import BatchFeature
 from ...feature_extraction_sequence_utils import SequenceFeatureExtractor
 from ...image_utils import ImageInput, make_nested_list_of_images
@@ -30,6 +32,12 @@ from ...tokenization_utils_base import PreTokenizedInput, TextInput
 from ...utils import to_py_obj, TensorType
 
 from ...audio_utils import AudioInput
+
+class InputMode(Enum):
+    LANGUAGE = 0
+    VISION = 1
+    SPEECH = 2
+    VISION_SPEECH = 3
 
 class Gemma3ImagesKwargs(ImagesKwargs):
     do_pan_and_scan: Optional[bool]
@@ -114,10 +122,17 @@ class Gemma3AudioFeatureExtractor(SequenceFeatureExtractor):
     model_input_names = ["input_audio_embeds", "audio_embed_sizes", "audio_attention_mask"]
     feature_extractor_type = "Gemma3AudioFeatureExtractor"
     def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+        self.sampling_rate = kwargs.pop("sampling_rate", 16000)
+        self.feature_size = kwargs.pop("feature_size", 80)
+        self.padding_value = kwargs.pop("padding_value", 0.0)
+        super().__init__(sampling_rate=self.sampling_rate, feature_size=self.feature_size, padding_value=self.padding_value, **kwargs)
+
+        self.compression_rate = kwargs.get("audio_compression_rate", 8)
+        self.qformer_compression_rate = kwargs.get("audio_downsample_rate", 1)
+        self.feat_stride = kwargs.get("audio_feat_stride", 1)
 
         self._eightk_method = "fillzero"
-        self._mel = speechlib_mel(sampling_rate, 512, feature_size, fmin=None, fmax=7690).T
+        self._mel = speechlib_mel(16000, 512, 80, fmin=None, fmax=7690).T
 
         self._hamming400 = np.hamming(400)  # for 16k audio
         self._hamming200 = np.hamming(200)  # for 8k audio
@@ -141,7 +156,7 @@ class Gemma3AudioFeatureExtractor(SequenceFeatureExtractor):
 
         for audio_data, sample_rate in audios:
             audio_embeds = self._extract_features(audio_data, sample_rate)
-            audio_frames = len(audio_embeds) * self.feat_stride
+            audio_frames = len(audio_embeds) * self.audio_feat_stride
             audio_embed_size = self._compute_audio_embed_size(audio_frames)
             returned_input_audio_embeds.append(torch.tensor(audio_embeds))
             returned_audio_embed_sizes.append(torch.tensor(audio_embed_size).long())
@@ -261,13 +276,13 @@ class Gemma3AudioFeatureExtractor(SequenceFeatureExtractor):
         return log_fbank
 
     def _compute_audio_embed_size(self, audio_frames):
-        integer = audio_frames // self.compression_rate
-        remainder = audio_frames % self.compression_rate
+        integer = audio_frames // self.audio_compression_rate
+        remainder = audio_frames % self.audio_compression_rate
 
         result = integer if remainder == 0 else integer + 1
 
-        integer = result // self.qformer_compression_rate
-        remainder = result % self.qformer_compression_rate
+        integer = result // self.audio_downsample_rate
+        remainder = result % self.audio_downsample_rate
         result = integer if remainder == 0 else integer + 1  # qformer compression
 
         return result
@@ -312,7 +327,7 @@ class Gemma3Processor(ProcessorMixin):
         images: ImageInput = None,
         text: Union[TextInput, PreTokenizedInput, List[TextInput], List[PreTokenizedInput]] = None,
         videos=None,
-        audios: AudioInput = None,
+        audios: List[AudioInput] = None,
         **kwargs: Unpack[Gemma3ProcessorKwargs],
     ) -> BatchFeature:
         if text is None and images is None:
@@ -382,7 +397,29 @@ class Gemma3Processor(ProcessorMixin):
                 result += parts[-1]
                 return result
 
-            audio_inputs = self.feature_extractor(audios[0])
+            def normalize_audio_input(audios):
+                if isinstance(audios, (np.ndarray, torch.Tensor)) or (isinstance(audios, tuple) and len(audios) == 2 and isinstance(audios[0], np.ndarray)):
+                    return [audios]
+                
+                if isinstance(audios, list):
+                    if len(audios) == 1 and isinstance(audios[0], list) and all(
+                        isinstance(item, (np.ndarray, torch.Tensor)) or 
+                        (isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], np.ndarray)) 
+                        for item in audios[0]
+                    ):
+                        return audios[0]
+                    
+                    if all(
+                        isinstance(item, (np.ndarray, torch.Tensor)) or 
+                        (isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], np.ndarray))
+                        for item in audios
+                    ):
+                        return audios
+                
+                raise ValueError(f"지원되지 않는 오디오 입력 형식: {type(audios)}")
+            
+            audios = normalize_audio_input(audios)
+            audio_inputs = self.feature_extractor(audios)
 
             full_audio_sequences = []
             for i, embed_size in enumerate(audio_inputs.audio_embed_sizes):
@@ -400,7 +437,19 @@ class Gemma3Processor(ProcessorMixin):
         mm_token_type_ids[array_ids == self.audio_token_id] = 2
         text_inputs = {k: v.tolist() for k, v in text_inputs.items()}  # in case user requested list inputs
         text_inputs["token_type_ids"] = mm_token_type_ids.tolist()
-        return BatchFeature(data={**text_inputs, **image_inputs, **audio_inputs}, tensor_type=return_tensors)
+        
+        # idenfity the input mode
+        if len(image_inputs) > 0 and len(audio_inputs) > 0:
+            input_mode = InputMode.VISION_SPEECH
+        elif len(image_inputs) > 0:
+            input_mode = InputMode.VISION
+        elif len(audio_inputs) > 0:
+            input_mode = InputMode.SPEECH
+        else:
+            input_mode = InputMode.LANGUAGE
+        text_inputs["input_mode"] = torch.tensor([input_mode.value], dtype=torch.long)
+
+        return BatchFeature(data={**text_inputs, **image_inputs, **audio_inputs, }, tensor_type=return_tensors)
 
     # Copied from transformers.models.clip.processing_clip.CLIPProcessor.batch_decode with CLIP->Gemma
     def batch_decode(self, *args, **kwargs):

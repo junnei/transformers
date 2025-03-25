@@ -42,8 +42,7 @@ if TYPE_CHECKING:
 logger = logging.get_logger(__name__)
 
 AudioInput = Union[
-    np.ndarray, "torch.Tensor", Tuple[np.ndarray, int], 
-    List[np.ndarray], List["torch.Tensor"], List[Tuple[np.ndarray, int]],
+    np.ndarray, "torch.Tensor", Tuple[np.ndarray, int]
 ]
 
 def load_audio(audio: Union[str, Tuple[np.ndarray, int]], timeout: Optional[float] = None) -> Tuple[np.ndarray, int]:

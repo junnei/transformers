@@ -45,7 +45,7 @@ from ...utils import (
 from ...utils.deprecation import deprecate_kwarg
 from ..auto import AutoModel, AutoModelForCausalLM
 from .configuration_gemma3 import Gemma3Config, Gemma3TextConfig
-
+from .processing_gemma3 import InputMode
 from .speech_conformer_encoder import ConformerEncoder
 
 logger = logging.get_logger(__name__)
@@ -1019,6 +1019,7 @@ class Gemma3ForCausalLM(Gemma3PreTrainedModel, GenerationMixin):
         input_ids,
         past_key_values=None,
         attention_mask=None,
+        input_mode=None,
         inputs_embeds=None,
         cache_position=None,
         position_ids=None,
@@ -1032,6 +1033,7 @@ class Gemma3ForCausalLM(Gemma3PreTrainedModel, GenerationMixin):
             input_ids,
             past_key_values=past_key_values,
             attention_mask=attention_mask,
+            input_mode=input_mode,
             inputs_embeds=inputs_embeds,
             cache_position=cache_position,
             position_ids=position_ids,
@@ -1138,7 +1140,46 @@ class Gemma3ForConditionalGeneration(Gemma3PreTrainedModel, GenerationMixin):
         self.language_model = language_model
 
         self.pad_token_id = self.config.pad_token_id if self.config.pad_token_id is not None else -1
+        
+        # LoRA 어댑터 설정 추가
+        if hasattr(config, "speech_lora") and config.speech_lora is not None:
+            from peft import LoraConfig, get_peft_model
+            import warnings
+            
+            speech_lora_config = LoraConfig(
+                r=config.speech_lora['r'],
+                lora_alpha=config.speech_lora['lora_alpha'],
+                target_modules=config.speech_lora['layer'],
+                use_rslora=config.speech_lora['use_rslora'],
+                lora_dropout=config.speech_lora['dp'],
+                task_type="CAUSAL_LM",
+            )
+            self.language_model.model = get_peft_model(self.language_model.model, speech_lora_config, adapter_name="speech")
+        
         self.post_init()
+        
+    def set_lora_adapter(self, adapter_name) -> None:
+        from peft.tuners.lora.layer import LoraLayer
+        for module in self.modules():
+            if isinstance(module, LoraLayer):
+                if module.merged:
+                    warnings.warn("Adapter cannot be set when the model is merged. Unmerging the model first.")
+                    module.unmerge()
+                module.set_adapter(adapter_name)
+                module._disable_adapters = False
+
+    def unset_lora_adapter(self) -> None:
+        # Ref: peft/tuners/tuners_utils.py - enable_adapters()
+        # Ref: peft/tuners/lora/layer.py
+        from peft.tuners.lora.layer import LoraLayer
+        for module in self.modules():
+            if isinstance(module, LoraLayer):
+                # disable grads on all adapter layers
+                # TODO weijian: may use enable_adapters() instead
+                for layer_name in module.adapter_layer_names:
+                    layer = getattr(module, layer_name)
+                    layer.requires_grad_(False)
+                module._disable_adapters = True
 
     def get_input_embeddings(self):
         return self.language_model.get_input_embeddings()
@@ -1267,6 +1308,7 @@ class Gemma3ForConditionalGeneration(Gemma3PreTrainedModel, GenerationMixin):
         audio_embed_sizes: torch.FloatTensor = None,
         audio_attention_mask: torch.FloatTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
+        input_mode: torch.LongTensor = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Union[List[torch.FloatTensor], Cache]] = None,
         token_type_ids: Optional[torch.LongTensor] = None,
@@ -1325,6 +1367,25 @@ class Gemma3ForConditionalGeneration(Gemma3PreTrainedModel, GenerationMixin):
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        if isinstance(input_mode, torch.Tensor):
+            # len(input_mode) == num_beams in beam search, and all elements of input_mode should have the same value
+            input_mode = input_mode[0].item()
+
+        input_mode = InputMode(input_mode)
+
+        if input_mode in [InputMode.VISION_SPEECH, InputMode.VISION]:
+            self.unset_lora_adapter()
+            #self.set_lora_adapter('vision')
+            #audio_projection_mode = 'vision'
+        elif input_mode == InputMode.SPEECH:
+            self.set_lora_adapter('speech')
+            #audio_projection_mode = 'speech'
+        elif input_mode == InputMode.LANGUAGE:
+            self.unset_lora_adapter()
+            #audio_projection_mode = 'speech'
+        else:
+            raise ValueError(f"Invalid input_mode: {input_mode}")
 
         is_training = token_type_ids is not None and labels is not None
 
@@ -1464,6 +1525,7 @@ class Gemma3ForConditionalGeneration(Gemma3PreTrainedModel, GenerationMixin):
         self,
         input_ids,
         past_key_values=None,
+        input_mode=None,
         inputs_embeds=None,
         cache_position=None,
         position_ids=None,
@@ -1482,6 +1544,7 @@ class Gemma3ForConditionalGeneration(Gemma3PreTrainedModel, GenerationMixin):
         model_inputs = self.language_model.prepare_inputs_for_generation(
             input_ids,
             past_key_values=past_key_values,
+            input_mode=input_mode,
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -1502,6 +1565,7 @@ class Gemma3ForConditionalGeneration(Gemma3PreTrainedModel, GenerationMixin):
             model_inputs["input_audio_embeds"] = input_audio_embeds
             model_inputs["audio_embed_sizes"] = audio_embed_sizes
             model_inputs["audio_attention_mask"] = audio_attention_mask
+        model_inputs["input_mode"] = input_mode
         is_training = token_type_ids is not None and labels is not None
         if cache_position[0] == 0 and isinstance(past_key_values, HybridCache):
             input_tensor = inputs_embeds if inputs_embeds is not None else input_ids
