@@ -398,18 +398,21 @@ class Gemma3Processor(ProcessorMixin):
                 return result
 
             full_audio_sequences = []
+            audio_inputs_list = []
 
-            for audio_inputs in audios:
+            for batched_audios in audios:
                 audio_sequences = []
-                audio_inputs = self.feature_extractor(audio_inputs)
-          
-                for i, embed_size in enumerate(audio_inputs.audio_embed_sizes):
+                batched_audios = self.feature_extractor(batched_audios)
+                for i, embed_size in enumerate(batched_audios.audio_embed_sizes):
                     audio_tokens_expanded = "".join([self.audio_token] * embed_size)
                     audio_sequence = f"\n\n{self.boa_token}{audio_tokens_expanded}{self.eoa_token}\n\n"
                     audio_sequences.append(audio_sequence)
                 
                 full_audio_sequences.append(audio_sequences)
+                audio_inputs_list.append(batched_audios)
 
+            for key in audio_inputs_list[0].keys():
+                audio_inputs[key] = torch.cat([inputs[key] for inputs in audio_inputs_list], dim=0)
             text = [replace_tokens_sequentially(prompt, self.boa_token, audio_sequences) for (prompt, audio_sequences) in zip(text, full_audio_sequences)]
 
         text_inputs = self.tokenizer(text=text, **output_kwargs["text_kwargs"], return_tensors="np")
