@@ -1019,7 +1019,7 @@ class Gemma3ForCausalLM(Gemma3PreTrainedModel, GenerationMixin):
         input_ids,
         past_key_values=None,
         attention_mask=None,
-        input_mode=None,
+        input_modes=None,
         inputs_embeds=None,
         cache_position=None,
         position_ids=None,
@@ -1033,7 +1033,7 @@ class Gemma3ForCausalLM(Gemma3PreTrainedModel, GenerationMixin):
             input_ids,
             past_key_values=past_key_values,
             attention_mask=attention_mask,
-            input_mode=input_mode,
+            input_modes=input_modes,
             inputs_embeds=inputs_embeds,
             cache_position=cache_position,
             position_ids=position_ids,
@@ -1308,7 +1308,7 @@ class Gemma3ForConditionalGeneration(Gemma3PreTrainedModel, GenerationMixin):
         audio_embed_sizes: torch.FloatTensor = None,
         audio_attention_mask: torch.FloatTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
-        input_mode: torch.LongTensor = None,
+        input_modes: torch.LongTensor = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Union[List[torch.FloatTensor], Cache]] = None,
         token_type_ids: Optional[torch.LongTensor] = None,
@@ -1368,11 +1368,13 @@ class Gemma3ForConditionalGeneration(Gemma3PreTrainedModel, GenerationMixin):
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        if isinstance(input_mode, torch.Tensor):
+        if isinstance(input_modes, torch.Tensor):
             # len(input_mode) == num_beams in beam search, and all elements of input_mode should have the same value
-            input_mode = input_mode[0].item()
+            input_modes = input_modes.unique()
+            if len(input_modes) != 1:
+                raise ValueError("Elements of input_modes should have the same value")
 
-        input_mode = InputMode(input_mode)
+        input_mode = InputMode(input_modes.item())
 
         if input_mode in [InputMode.VISION_SPEECH, InputMode.VISION]:
             self.unset_lora_adapter()
@@ -1525,7 +1527,7 @@ class Gemma3ForConditionalGeneration(Gemma3PreTrainedModel, GenerationMixin):
         self,
         input_ids,
         past_key_values=None,
-        input_mode=None,
+        input_modes=None,
         inputs_embeds=None,
         cache_position=None,
         position_ids=None,
@@ -1544,7 +1546,7 @@ class Gemma3ForConditionalGeneration(Gemma3PreTrainedModel, GenerationMixin):
         model_inputs = self.language_model.prepare_inputs_for_generation(
             input_ids,
             past_key_values=past_key_values,
-            input_mode=input_mode,
+            input_modes=input_modes,
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -1565,7 +1567,7 @@ class Gemma3ForConditionalGeneration(Gemma3PreTrainedModel, GenerationMixin):
             model_inputs["input_audio_embeds"] = input_audio_embeds
             model_inputs["audio_embed_sizes"] = audio_embed_sizes
             model_inputs["audio_attention_mask"] = audio_attention_mask
-        model_inputs["input_mode"] = input_mode
+        model_inputs["input_modes"] = input_modes
         is_training = token_type_ids is not None and labels is not None
         if cache_position[0] == 0 and isinstance(past_key_values, HybridCache):
             input_tensor = inputs_embeds if inputs_embeds is not None else input_ids

@@ -397,36 +397,20 @@ class Gemma3Processor(ProcessorMixin):
                 result += parts[-1]
                 return result
 
-            def normalize_audio_input(audios):
-                if isinstance(audios, (np.ndarray, torch.Tensor)) or (isinstance(audios, tuple) and len(audios) == 2 and isinstance(audios[0], np.ndarray)):
-                    return [audios]
-                
-                if isinstance(audios, list):
-                    if len(audios) == 1 and isinstance(audios[0], list) and all(
-                        isinstance(item, (np.ndarray, torch.Tensor)) or 
-                        (isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], np.ndarray)) 
-                        for item in audios[0]
-                    ):
-                        return audios[0]
-                    
-                    if all(
-                        isinstance(item, (np.ndarray, torch.Tensor)) or 
-                        (isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], np.ndarray))
-                        for item in audios
-                    ):
-                        return audios
-                
-                raise ValueError(f"지원되지 않는 오디오 입력 형식: {type(audios)}")
-            
-            audios = normalize_audio_input(audios)
-            audio_inputs = self.feature_extractor(audios)
-
             full_audio_sequences = []
-            for i, embed_size in enumerate(audio_inputs.audio_embed_sizes):
-                audio_tokens_expanded = "".join([self.audio_token] * embed_size)
-                full_audio_sequence = f"\n\n{self.boa_token}{audio_tokens_expanded}{self.eoa_token}\n\n"
-                full_audio_sequences.append(full_audio_sequence)
-            text = [replace_tokens_sequentially(prompt, self.boa_token, full_audio_sequences) for prompt in text]
+
+            for audio_inputs in audios:
+                audio_sequences = []
+                audio_inputs = self.feature_extractor(audio_inputs)
+          
+                for i, embed_size in enumerate(audio_inputs.audio_embed_sizes):
+                    audio_tokens_expanded = "".join([self.audio_token] * embed_size)
+                    audio_sequence = f"\n\n{self.boa_token}{audio_tokens_expanded}{self.eoa_token}\n\n"
+                    audio_sequences.append(audio_sequence)
+                
+                full_audio_sequences.append(audio_sequences)
+
+            text = [replace_tokens_sequentially(prompt, self.boa_token, audio_sequences) for (prompt, audio_sequences) in zip(text, full_audio_sequences)]
 
         text_inputs = self.tokenizer(text=text, **output_kwargs["text_kwargs"], return_tensors="np")
 
@@ -435,20 +419,15 @@ class Gemma3Processor(ProcessorMixin):
         mm_token_type_ids = np.zeros_like(text_inputs["input_ids"])
         mm_token_type_ids[array_ids == self.image_token_id] = 1
         mm_token_type_ids[array_ids == self.audio_token_id] = 2
+
+        has_vision_ids = np.any(mm_token_type_ids == 1, axis=1)
+        has_audio_ids = np.any(mm_token_type_ids == 2, axis=1)
+        input_modes = (has_audio_ids << 1) | has_vision_ids
+
         text_inputs = {k: v.tolist() for k, v in text_inputs.items()}  # in case user requested list inputs
         text_inputs["token_type_ids"] = mm_token_type_ids.tolist()
+        text_inputs["input_modes"] = input_modes.tolist()
         
-        # idenfity the input mode
-        if len(image_inputs) > 0 and len(audio_inputs) > 0:
-            input_mode = InputMode.VISION_SPEECH
-        elif len(image_inputs) > 0:
-            input_mode = InputMode.VISION
-        elif len(audio_inputs) > 0:
-            input_mode = InputMode.SPEECH
-        else:
-            input_mode = InputMode.LANGUAGE
-        text_inputs["input_mode"] = torch.tensor([input_mode.value], dtype=torch.long)
-
         return BatchFeature(data={**text_inputs, **image_inputs, **audio_inputs, }, tensor_type=return_tensors)
 
     # Copied from transformers.models.clip.processing_clip.CLIPProcessor.batch_decode with CLIP->Gemma
